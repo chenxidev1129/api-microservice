@@ -1,0 +1,31 @@
+server:
+  # Server bind address
+  address: "0.0.0.0"
+  # Server bind port
+  port: "${SERVER_PORT:9094}"
+
+rest:
+  tb:
+    # Rest URL of the TB instance. Please replace $PUT_YOUR_TB_URL with actual url.
+    url: "${REST_URL:$PUT_YOUR_TB_URL}"
+    ssl: "${REST_SSL:true}"
+    read_timeout: "${REST_READ_TIMEOUT:0}"
+  s3:
+    # Rest S3 URL. Please replace $PUT_YOUR_S3_URL with actual url.
+    url: "${REST_S3_URL:$PUT_YOUR_S3_URL}"
+    ssl: "${REST_S3_SSL:true}"
+    read_timeout: "${REST_S3_READ_TIMEOUT:0}"
+
+swagger:
+  api_path_regex: "${SWAGGER_API_PATH_REGEX:/api.*}"
+  title: "${SWAGGER_TITLE:GeoSensorX REST API}"
+  description: "${SWAGGER_DESCRIPTION:}"
+  contact:
+    name: "${SWAGGER_CONTACT_NAME:GeoSensorX Team}"
+    url: "${SWAGGER_CONTACT_URL:https://www.geosensorx.ai/}"
+    email: "${SWAGGER_CONTACT_EMAIL:}"
+  license:
+    title: "${SWAGGER_LICENSE_TITLE:Apache License Version 2.0}"
+    url: "${SWAGGER_LICENSE_URL:}"
+  version: "${SWAGGER_VERSION:2.0}"
+
