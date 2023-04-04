@@ -1,11 +1,17 @@
 package com.geosensorx.service;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.geosensorx.cache.JwtTokenCache;
 import com.geosensorx.cache.JwtTokenCacheKey;
 import com.geosensorx.data.DeviceEntity;
+import com.geosensorx.data.mux.LiveStream;
+import com.geosensorx.data.mux.MuxInfoData;
+import com.geosensorx.data.mux.MuxListData;
+import com.geosensorx.http.client.MuxGeoSensorXHttpClient;
 import com.geosensorx.http.client.S3GeoSensorXHttpClient;
 import com.geosensorx.http.client.TbGeoSensorXHttpClient;
 import lombok.extern.slf4j.Slf4j;
@@ -30,11 +36,17 @@ import org.thingsboard.server.common.data.rpc.Rpc;
 import org.thingsboard.server.common.data.rpc.RpcStatus;
 import org.thingsboard.server.common.data.security.Authority;
 import org.thingsboard.server.common.data.security.DeviceCredentials;
+import springfox.documentation.spring.web.json.Json;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.time.Period;
+import java.util.Date;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Calendar;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -55,6 +67,9 @@ public class DefaultGeoSensorXService implements GeoSensorXService {
 
     @Autowired
     private S3GeoSensorXHttpClient s3HttpClient;
+
+    @Autowired
+    private MuxGeoSensorXHttpClient muxhttpClient;
 
     private JwtTokenCache jwtTokenCache;
     private ExecutorService executorService;
@@ -205,7 +220,7 @@ public class DefaultGeoSensorXService implements GeoSensorXService {
                         Device device = deviceResponseEntity.getBody();
                         String endPointURL = tbhttpClient.getBaseUrl() + "/api/rule-engine/DEVICE/" + device.getUuidId() + "/" + restApiTimeout + "/RestApiHandler";
                         log.debug("Jwt Token: [{}]", jwtToken);
-                        HttpHeaders headers = getDefaultHttpHeaders(jwtToken);
+                        HttpHeaders headers = getBearerTokenHttpHeaders(jwtToken);
                         ObjectNode params = (ObjectNode) requestBody.get("params");
                         params.put("ownerId", device.getOwnerId().toString());
                         params.put("ownerType", device.getOwnerId().getEntityType().name());
@@ -216,20 +231,17 @@ public class DefaultGeoSensorXService implements GeoSensorXService {
                         log.debug("Try to process device rest api request: {}, requestTime: {}", endPointURL, System.currentTimeMillis());
                         ListenableFuture<ResponseEntity<JsonNode>> future = tbhttpClient.exchange(
                                 endPointURL, HttpMethod.POST, httpEntity, JsonNode.class);
-                        future.addCallback(new ListenableFutureCallback<>() {
-                            @Override
-                            public void onFailure(Throwable throwable) {
-                                log.info("Failed to process request: {} due to: {}, responseTime: {}", finalRequestBody, throwable.getMessage(), System.currentTimeMillis());
-                                result.setErrorResult(onFailureHandler(throwable, endPointURL));
-                            }
 
-                            @Override
-                            public void onSuccess(ResponseEntity<JsonNode> responseEntity) {
-                                log.info("Successfully processed request: {}, responseTime: {}", finalRequestBody, System.currentTimeMillis());
-                                JsonNode body = responseEntity.getBody();
-                                result.setResult(onSuccessResponseHandle(body));
-                            }
-                        });
+                        ResponseEntity<JsonNode> data = future.get();
+                        if (data.getStatusCode().is2xxSuccessful()) {
+                            log.info("Successfully processed request: {}, responseTime: {}", finalRequestBody, System.currentTimeMillis());
+                            JsonNode body = data.getBody();
+                            result.setResult(onSuccessResponseHandle(body));
+                        } else {
+                            log.info("Failed to process request: {} due to: {}, responseTime: {}", finalRequestBody, data.getBody(), System.currentTimeMillis());
+                            result.setErrorResult(data);
+                        }
+
                         return result;
                     } else {
                         return deviceDeferredResult;
@@ -324,7 +336,7 @@ public class DefaultGeoSensorXService implements GeoSensorXService {
     public DeferredResult<ResponseEntity> processGetDeviceByName(String jwtToken, String deviceName) {
         DeferredResult<ResponseEntity> result = new DeferredResult<>();
         String endPointURL = tbhttpClient.getBaseUrl() + "/api/user/devices?pageSize=1000&page=0&textSearch=" + deviceName;
-        HttpHeaders headers = getDefaultHttpHeaders(jwtToken);
+        HttpHeaders headers = getBearerTokenHttpHeaders(jwtToken);
         HttpEntity<PageData<Device>> httpEntity = new HttpEntity<>(headers);
         log.debug("Try to process get user devices request: {}, requestTime: {}", endPointURL, System.currentTimeMillis());
         ListenableFuture<ResponseEntity<PageData<Device>>> deviceFuture = tbhttpClient.exchange(
@@ -342,6 +354,7 @@ public class DefaultGeoSensorXService implements GeoSensorXService {
                             .findFirst();
                     if (deviceOptional.isPresent()) {
                         result.setResult(new ResponseEntity(deviceOptional.get(), HttpStatus.OK));
+                        return result;
                     } else {
                         result.setErrorResult(deviceNotFoundResponseEntity(deviceName));
                     }
@@ -356,6 +369,7 @@ public class DefaultGeoSensorXService implements GeoSensorXService {
             log.error("[{}] Failed to find the device with the name due to: ", deviceName, cause);
             result.setErrorResult(onFailureHandler(cause, endPointURL));
         }
+
         return result;
     }
 
@@ -483,6 +497,361 @@ public class DefaultGeoSensorXService implements GeoSensorXService {
                 result.setErrorResult(onFailureHandler(throwable, getRpcByIdEndPointURL));
             }
         });
+        return result;
+    }
+
+    @Override
+    public DeferredResult<ResponseEntity> processGetAttributes(String jwtToken, String deviceId) {
+        DeferredResult<ResponseEntity> result = new DeferredResult<>();
+
+        HttpHeaders headers = getBearerTokenHttpHeaders(jwtToken);
+        HttpEntity<String> httpEntity = new HttpEntity<>(headers);
+        String getAttributesEndPointURL = tbhttpClient.getBaseUrl() + "/api/plugins/telemetry/DEVICE/" + deviceId + "/values/attributes/SERVER_SCOPE?keys=stream_key,playback_id,created_at";
+        log.debug("Try to process get attributes by device id request: {}, requestTime: {}", getAttributesEndPointURL, System.currentTimeMillis());
+        ListenableFuture<ResponseEntity<ArrayList<JsonNode>>> getAttributesFuture = tbhttpClient.exchange(
+                getAttributesEndPointURL, HttpMethod.GET, httpEntity, new ParameterizedTypeReference<>() {
+                });
+
+        try {
+            ResponseEntity<ArrayList<JsonNode>> data = getAttributesFuture.get();
+
+            result.setResult(data);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        } catch (ExecutionException e) {
+            e.printStackTrace();
+        }
+
+        return result;
+    }
+
+    @Override
+    public DeferredResult<ResponseEntity> processSetAttributes(String jwtToken, String deviceId, JsonNode requestBody) {
+        DeferredResult<ResponseEntity> result = new DeferredResult<>();
+
+        HttpHeaders headers = getBearerTokenHttpHeaders(jwtToken);
+        HttpEntity<JsonNode> httpEntity = new HttpEntity<>(requestBody, headers);
+        String setAttributesEndPointURL = tbhttpClient.getBaseUrl() + "/api/plugins/telemetry/DEVICE/" + deviceId + "/attributes/SERVER_SCOPE";
+        log.debug("Try to process set attributes by device id request: {}, requestTime: {}", setAttributesEndPointURL, System.currentTimeMillis());
+        ListenableFuture<ResponseEntity<JsonNode>> setAttributesFuture = tbhttpClient.exchange(
+                setAttributesEndPointURL, HttpMethod.POST, httpEntity, JsonNode.class);
+
+        try {
+            ResponseEntity<JsonNode> data = setAttributesFuture.get();
+
+            result.setResult(data);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        } catch (ExecutionException e) {
+            e.printStackTrace();
+        }
+
+        return result;
+    }
+
+    @Override
+    public DeferredResult<ResponseEntity> processCreateLiveStream(String jwtToken, String deviceName, JsonNode requestBody, long restApiTimeout) {
+        DeferredResult<ResponseEntity> deferredResult = processGetDeviceByName(jwtToken, deviceName);
+
+        if (deferredResult.hasResult()) {
+            try {
+                ResponseEntity<?> deviceResponse = (ResponseEntity<?>) deferredResult.getResult();
+                if (deviceResponse.getStatusCode().is2xxSuccessful()) {
+                    DeferredResult<ResponseEntity> result = new DeferredResult<>();
+
+                    ResponseEntity<Device> deviceResponseEntity = (ResponseEntity<Device>) deviceResponse;
+                    if (deviceResponseEntity.getBody() != null) {
+                        Device device = deviceResponseEntity.getBody();
+
+                        DeferredResult<ResponseEntity> getAttributeResponse = processGetAttributes(jwtToken, device.getUuidId().toString());
+                        ResponseEntity<ArrayList<JsonNode>> getAttributeResponseEntity = (ResponseEntity<ArrayList<JsonNode>>) getAttributeResponse.getResult();
+
+                        if (getAttributeResponseEntity.getStatusCode().is2xxSuccessful()) {
+                            ArrayList<JsonNode> attributeResult = getAttributeResponseEntity.getBody();
+
+                            String stream_key = "";
+                            String playback_id = "";
+                            long created_at = 0;
+
+                            Calendar c = Calendar.getInstance();
+                            c.setTime(new Date());
+                            c.add(Calendar.DATE, -5);
+                            created_at = c.getTime().getTime();
+
+                            for ( JsonNode atrributeInfo : attributeResult) {
+                                switch (atrributeInfo.get("key").textValue()) {
+                                    case "stream_key":
+                                        stream_key = atrributeInfo.get("value").textValue();
+                                        break;
+                                    case "playback_id":
+                                        playback_id = atrributeInfo.get("value").textValue();
+                                        break;
+                                    case "created_at":
+                                        created_at = atrributeInfo.get("value").longValue();
+                                        break;
+                                }
+                            }
+
+                            long diffInMillies = Math.abs(new Date().getTime() - created_at * 1000);
+                            long diff = TimeUnit.DAYS.convert(diffInMillies, TimeUnit.MILLISECONDS);
+
+                            if (stream_key.isEmpty() || playback_id.isEmpty() || diff > 1) {
+                                String endPointURL = muxhttpClient.getBaseUrl() + "/video/v1/live-streams";
+                                HttpHeaders headers = getBasicAuthHttpHeaders(muxhttpClient.muxApiToken, muxhttpClient.muxApiSecret);
+                                ObjectNode liveSteamRequest = mapper.createObjectNode();
+                                liveSteamRequest.put("playback_policy", "public");
+                                ObjectNode newAssetSettings = mapper.createObjectNode();
+                                ArrayList<String> playbackPolicy = new ArrayList<>();
+                                playbackPolicy.add("public");
+                                newAssetSettings.putPOJO("playback_policy", playbackPolicy);
+                                liveSteamRequest.set("new_asset_settings", newAssetSettings);
+                                HttpEntity<JsonNode> httpEntity = new HttpEntity<>(liveSteamRequest, headers);
+                                log.debug("Try to process create a live stream request: {}, requestTime: {}", endPointURL, System.currentTimeMillis());
+                                ListenableFuture<ResponseEntity<MuxInfoData<LiveStream>>> liveStreamFuture = muxhttpClient.exchange(
+                                        endPointURL, HttpMethod.POST, httpEntity, new ParameterizedTypeReference<>() {
+                                        });
+
+                                ResponseEntity<MuxInfoData<LiveStream>> data = liveStreamFuture.get();
+
+                                if (data.getStatusCode() == HttpStatus.CREATED) {
+                                    ObjectNode responseNode = mapper.createObjectNode();
+                                    LiveStream liveStreamInfo = data.getBody().getData();
+
+                                    ObjectNode attributesRequestBody = mapper.createObjectNode();
+                                    attributesRequestBody.put("stream_key", liveStreamInfo.stream_key);
+                                    attributesRequestBody.put("playback_id", liveStreamInfo.playback_ids.get(0).id);
+                                    attributesRequestBody.put("created_at", liveStreamInfo.created_at);
+                                    DeferredResult<ResponseEntity> setAttributeResponse = processSetAttributes(jwtToken, device.getUuidId().toString(), attributesRequestBody);
+                                    ResponseEntity<?> setAttributeResponseEntity = (ResponseEntity<?>) setAttributeResponse.getResult();
+
+                                    if (setAttributeResponseEntity.getStatusCode().is2xxSuccessful()) {
+                                        ObjectNode dataResult = mapper.createObjectNode();
+                                        dataResult.put("playId", liveStreamInfo.playback_ids.get(0).id);
+                                        dataResult.put("streamKey", liveStreamInfo.stream_key);
+                                        responseNode.set("data", dataResult);
+
+                                        result.setResult(new ResponseEntity<>(responseNode, HttpStatus.OK));
+                                    } else {
+                                        result.setResult(setAttributeResponseEntity);
+                                    }
+                                } else {
+                                    result.setErrorResult(new ResponseEntity<>(data.getBody(), data.getStatusCode()));
+                                }
+                            }
+                            else {
+                                ObjectNode responseNode = mapper.createObjectNode();
+                                ObjectNode dataResult = mapper.createObjectNode();
+                                dataResult.put("playId", playback_id);
+                                dataResult.put("streamKey", stream_key);
+                                responseNode.set("data", dataResult);
+
+                                result.setResult(new ResponseEntity<>(responseNode, HttpStatus.OK));
+                            }
+
+                        } else {
+                            result.setErrorResult(getAttributeResponseEntity);
+                        }
+
+                        return result;
+                    }
+                }
+
+                return deferredResult;
+            } catch (Exception e) {
+                Throwable cause = e.getCause();
+                DeferredResult<ResponseEntity> errorDeferredResult = new DeferredResult<>();
+                errorDeferredResult.setErrorResult(onFailureHandler(cause, "processDeviceRestApiRequestToRuleEngine"));
+                return errorDeferredResult;
+            }
+        } else {
+            return deferredResult;
+        }
+    }
+
+    @Override
+    public DeferredResult<ResponseEntity> processStopLiveStream(String jwtToken, String deviceName, long restApiTimeout) {
+        DeferredResult<ResponseEntity> deferredResult = processGetDeviceByName(jwtToken, deviceName);
+
+        if (deferredResult.hasResult()) {
+            try {
+                ResponseEntity<?> deviceResponse = (ResponseEntity<?>) deferredResult.getResult();
+                if (deviceResponse.getStatusCode().is2xxSuccessful()) {
+                    DeferredResult<ResponseEntity> result = new DeferredResult<>();
+                    ResponseEntity<Device> deviceResponseEntity = (ResponseEntity<Device>) deviceResponse;
+                    if (deviceResponseEntity.getBody() != null) {
+                        Device device = deviceResponseEntity.getBody();
+
+                        DeferredResult<ResponseEntity> getAttributeResponse = processGetAttributes(jwtToken, device.getUuidId().toString());
+                        ResponseEntity<ArrayList<JsonNode>> getAttributeResponseEntity = (ResponseEntity<ArrayList<JsonNode>>) getAttributeResponse.getResult();
+
+                        if (getAttributeResponseEntity.getStatusCode().is2xxSuccessful()) {
+                            ArrayList<JsonNode> attributeResult = getAttributeResponseEntity.getBody();
+
+                            String stream_key = "";
+                            String playback_id = "";
+
+                            for ( JsonNode atrributeInfo : attributeResult) {
+                                switch (atrributeInfo.get("key").textValue()) {
+                                    case "stream_key":
+                                        stream_key = atrributeInfo.get("value").textValue();
+                                        break;
+                                    case "playback_id":
+                                        playback_id = atrributeInfo.get("value").textValue();
+                                        break;
+                                }
+                            }
+
+                            if (!stream_key.isEmpty() && !playback_id.isEmpty()) {
+                                ObjectNode responseNode = mapper.createObjectNode();
+
+                                ObjectNode dataResult = mapper.createObjectNode();
+                                dataResult.put("playId", playback_id);
+                                dataResult.put("streamKey", stream_key);
+                                responseNode.set("data", dataResult);
+
+                                result.setResult(new ResponseEntity<>(responseNode, HttpStatus.OK));
+                            } else {
+                                result.setErrorResult(new ResponseEntity<>("There are no values", HttpStatus.NO_CONTENT));
+                            }
+                        } else {
+                            result.setErrorResult(getAttributeResponseEntity);
+                        }
+
+                        return result;
+                    }
+                }
+
+                return deferredResult;
+            } catch (Exception e) {
+                Throwable cause = e.getCause();
+                DeferredResult<ResponseEntity> errorDeferredResult = new DeferredResult<>();
+                errorDeferredResult.setErrorResult(onFailureHandler(cause, "processDeviceRestApiRequestToRuleEngine"));
+                return errorDeferredResult;
+            }
+        } else {
+            return deferredResult;
+        }
+    }
+
+    @Override
+    public DeferredResult<ResponseEntity> processDeleteLiveStream(String jwtToken, String deviceName, long restApiTimeout) {
+        DeferredResult<ResponseEntity> deferredResult = processGetDeviceByName(jwtToken, deviceName);
+
+        if (deferredResult.hasResult()) {
+            try {
+                ResponseEntity<?> deviceResponse = (ResponseEntity<?>) deferredResult.getResult();
+                if (deviceResponse.getStatusCode().is2xxSuccessful()) {
+                    DeferredResult<ResponseEntity> result = new DeferredResult<>();
+                    ResponseEntity<Device> deviceResponseEntity = (ResponseEntity<Device>) deviceResponse;
+                    if (deviceResponseEntity.getBody() != null) {
+                        Device device = deviceResponseEntity.getBody();
+
+                        DeferredResult<ResponseEntity> getAttributeResponse = processGetAttributes(jwtToken, device.getUuidId().toString());
+                        ResponseEntity<ArrayList<JsonNode>> getAttributeResponseEntity = (ResponseEntity<ArrayList<JsonNode>>) getAttributeResponse.getResult();
+
+                        if (getAttributeResponseEntity.getStatusCode().is2xxSuccessful()) {
+                            ArrayList<JsonNode> attributeResult = getAttributeResponseEntity.getBody();
+
+                            String stream_key = "";
+                            String playback_id = "";
+
+                            for ( JsonNode atrributeInfo : attributeResult) {
+                                switch (atrributeInfo.get("key").textValue()) {
+                                    case "stream_key":
+                                        stream_key = atrributeInfo.get("value").textValue();
+                                        break;
+                                    case "playback_id":
+                                        playback_id = atrributeInfo.get("value").textValue();
+                                        break;
+                                }
+                            }
+
+                            if (!stream_key.isEmpty() && !playback_id.isEmpty()) {
+                                String endPointURL = muxhttpClient.getBaseUrl() + "/video/v1/live-streams/" + stream_key;
+                                HttpHeaders headers = getBasicAuthHttpHeaders(muxhttpClient.muxApiToken, muxhttpClient.muxApiSecret);
+                                ObjectNode liveSteamRequest = mapper.createObjectNode();
+                                HttpEntity<JsonNode> httpEntity = new HttpEntity<>(liveSteamRequest, headers);
+                                log.debug("Try to process delete a live stream request: {}, requestTime: {}", endPointURL, System.currentTimeMillis());
+
+                                ListenableFuture<ResponseEntity<JsonNode>> liveStreamFuture = muxhttpClient.exchange(
+                                        endPointURL, HttpMethod.DELETE, httpEntity, JsonNode.class);
+
+                                ResponseEntity<JsonNode> data = liveStreamFuture.get();
+
+                                if (data.getStatusCode() == HttpStatus.NO_CONTENT) {
+                                    ObjectNode responseNode = mapper.createObjectNode();
+
+                                    ObjectNode dataResult = mapper.createObjectNode();
+                                    dataResult.put("rpcId", device.getUuidId().toString());
+                                    dataResult.put("status", "SUCCESS");
+                                    responseNode.set("data", dataResult);
+
+                                    result.setResult(new ResponseEntity<>(responseNode, HttpStatus.OK));
+                                } else {
+                                    result.setErrorResult(new ResponseEntity<>(data.getBody(), data.getStatusCode()));
+                                }
+                            } else {
+                                result.setErrorResult(new ResponseEntity<>("There are no values", HttpStatus.NO_CONTENT));
+                            }
+                        } else {
+                            result.setErrorResult(getAttributeResponseEntity);
+                        }
+
+                        return result;
+                    }
+                }
+
+                return deferredResult;
+            } catch (Exception e) {
+                Throwable cause = e.getCause();
+                DeferredResult<ResponseEntity> errorDeferredResult = new DeferredResult<>();
+                errorDeferredResult.setErrorResult(onFailureHandler(cause, "processDeviceRestApiRequestToRuleEngine"));
+                return errorDeferredResult;
+            }
+        } else {
+            return deferredResult;
+        }
+    }
+
+    @Override
+    public DeferredResult<ResponseEntity> processGetLiveStreams(String jwtToken, JsonNode requestBody) {
+        DeferredResult<ResponseEntity> result = new DeferredResult<>();
+
+        String endPointURL = muxhttpClient.getBaseUrl() + "/video/v1/live-streams";
+        HttpHeaders headers = getBasicAuthHttpHeaders(muxhttpClient.muxApiToken, muxhttpClient.muxApiSecret);
+        ObjectNode liveSteamRequest = mapper.createObjectNode();
+        HttpEntity<JsonNode> httpEntity = new HttpEntity<>(liveSteamRequest, headers);
+        log.debug("Try to process get live streams request: {}, requestTime: {}", endPointURL, System.currentTimeMillis());
+        ListenableFuture<ResponseEntity<JsonNode>> future = muxhttpClient.exchange(
+                endPointURL, HttpMethod.GET, httpEntity, JsonNode.class);
+        future.addCallback(new ListenableFutureCallback<>() {
+            @Override
+            public void onSuccess(ResponseEntity<JsonNode> responseEntity) {
+//                log.info("Successfully processed login request for user: {}", tokenKey.getUserName());
+//                jwtTokenCache.put(tokenKey, responseEntity.getBody());
+                ObjectMapper objectMapper = new ObjectMapper();
+                ArrayList<LiveStream> liveStreamList = new ArrayList<>();
+
+                try {
+                    String jsonArrayAsString = objectMapper.writeValueAsString(responseEntity.getBody().get("data"));
+                    liveStreamList = objectMapper.readValue(jsonArrayAsString, new TypeReference<ArrayList<LiveStream>>() {});
+                } catch (JsonProcessingException e) {
+                    e.printStackTrace();
+                }
+                result.setResult(new ResponseEntity<>(liveStreamList, HttpStatus.OK));
+            }
+
+            @Override
+            public void onFailure(Throwable throwable) {
+                log.error("Failed to process request: {} due to: {}", endPointURL, throwable.getMessage());
+                if (throwable instanceof HttpClientErrorException) {
+                    result.setErrorResult(new ResponseEntity<>(throwable.getMessage(), ((HttpClientErrorException) throwable).getStatusCode()));
+                } else {
+                    result.setErrorResult(new ResponseEntity<>(throwable.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR));
+                }
+            }
+        });
+
         return result;
     }
 
@@ -637,6 +1006,25 @@ public class DefaultGeoSensorXService implements GeoSensorXService {
         HttpHeaders headers = new HttpHeaders();
         headers.add("X-Authorization", jwtToken);
         headers.add("Accept", "application/json");
+        return headers;
+    }
+
+    private HttpHeaders getBearerTokenHttpHeaders(String jwtToken) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.add(HttpHeaders.AUTHORIZATION, "Bearer " + jwtToken);
+        headers.add(HttpHeaders.ACCEPT, "application/json");
+        headers.add(HttpHeaders.CONTENT_TYPE, "application/json");
+        return headers;
+    }
+
+    private HttpHeaders getBasicAuthHttpHeaders(String userName, String password) {
+        String auth = userName + ":" + password;
+        String encodedAuth = Base64.getEncoder().encodeToString(auth.getBytes(StandardCharsets.UTF_8));
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.add(HttpHeaders.AUTHORIZATION, "Basic " + encodedAuth);
+        headers.add(HttpHeaders.ACCEPT, "application/json");
+        headers.add(HttpHeaders.CONTENT_TYPE, "application/json");
         return headers;
     }
 

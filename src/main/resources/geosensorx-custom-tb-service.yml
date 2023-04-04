@@ -7,7 +7,7 @@ server:
 rest:
   tb:
     # Rest URL of the TB instance. Please replace $PUT_YOUR_TB_URL with actual url.
-    url: "${REST_URL:$PUT_YOUR_TB_URL}"
+    url: "${REST_URL:https://dev.geosensorx.ai:443}"
     ssl: "${REST_SSL:true}"
     read_timeout: "${REST_READ_TIMEOUT:0}"
   s3:
@@ -15,6 +15,14 @@ rest:
     url: "${REST_S3_URL:$PUT_YOUR_S3_URL}"
     ssl: "${REST_S3_SSL:true}"
     read_timeout: "${REST_S3_READ_TIMEOUT:0}"
+
+  mux:
+    # Rest URL of the Mux instance. Please replace $PUT_YOUR_MUX_URL with actual url.
+    url: "${REST_MUX_URL:https://api.mux.com}"
+    ssl: "${REST_MUX_SSL:true}"
+    read_timeout: "${REST_MUX_READ_TIMEOUT:0}"
+    token: "${REST_MUX_TOKEN:ee6829c2-5155-4ca2-8517-ed59e97f7911}"
+    secret: "${REST_MUX_SECRET:zduAb/j5fgPqik+xzoHsKohfXwIoW1r4v/KlsEU0TPHmsIlY1+y3jvVptAVwP6ifPA8aDwHxeiP}"
 
 swagger:
   api_path_regex: "${SWAGGER_API_PATH_REGEX:/api.*}"
