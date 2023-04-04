@@ -693,11 +693,31 @@ public class GeoSensorXController {
                                                         @RequestParam(name = "restApiTimeout", required = false, defaultValue = "15000") long restApiTimeout,
                                                         @RequestBody String requestBody,
                                                         HttpServletRequest httpServletRequest) throws GeoSensorXException {
+        DeferredResult<ResponseEntity> result = new DeferredResult<>();
         String jwtToken = getJwtTokenFromRequest(httpServletRequest);
         JsonNode payload;
 
         try {
             payload = mapper.readTree(requestBody);
+
+            if (payload.has("cmd")) {
+                if (!payload.get("cmd").textValue().equalsIgnoreCase("start") && !payload.get("cmd").textValue().equalsIgnoreCase("stop")) {
+                    result.setErrorResult(new ResponseEntity<>("cmd is invalid", HttpStatus.INTERNAL_SERVER_ERROR));
+                    return result;
+                }
+            }
+            if (payload.has("channel")) {
+                if (payload.get("channel").intValue() != 0 && payload.get("channel").intValue() != 1) {
+                    result.setErrorResult(new ResponseEntity<>("channel is invalid", HttpStatus.INTERNAL_SERVER_ERROR));
+                    return result;
+                }
+            }
+            if (payload.has("interval")) {
+                if (payload.get("interval").intValue() != 0 && payload.get("interval").intValue() != 1) {
+                    result.setErrorResult(new ResponseEntity<>("interval is invalid", HttpStatus.INTERNAL_SERVER_ERROR));
+                    return result;
+                }
+            }
         } catch (IOException e) {
             throw new GeoSensorXException("Invalid request body structure: " + requestBody + "! Reason: " + e.getMessage(), GeoSensorXErrorCode.BAD_REQUEST_PARAMS);
         }
@@ -711,7 +731,9 @@ public class GeoSensorXController {
         request.set("params", params);
 
         try {
-            DeferredResult<ResponseEntity> result = new DeferredResult<>();
+            ObjectNode rpcRequestBody;
+            DeferredResult<ResponseEntity> rpcResult;
+            ResponseEntity<?> rpcResponse;
 
             switch (payload.get("cmd").textValue()) {
                 case "start":
@@ -721,12 +743,12 @@ public class GeoSensorXController {
                     if (createResponse.getStatusCode() == HttpStatus.OK) {
                         ResponseEntity<ObjectNode> createResponseEntity = (ResponseEntity<ObjectNode>) createResult.getResult();
 
-                        ObjectNode rpcRequestBody = mapper.createObjectNode();
+                        rpcRequestBody = mapper.createObjectNode();
                         rpcRequestBody.put("method", "stream-vid");
                         rpcRequestBody.put("params", "start," + (payload.has("channel") ? payload.get("channel").intValue() : "") + "," + (payload.has("interval") ? payload.get("interval").intValue() : "") + ",rtmp://global-live.mux.com:5222/app/" + createResponseEntity.getBody().get("data").get("streamKey").textValue() + "," + (payload.has("duration") ? payload.get("duration").intValue() : ""));
 
-                        DeferredResult<ResponseEntity> rpcResult = processRpcRequest(deviceName, 0, 126227808, restApiTimeout, rpcRequestBody.toPrettyString(),httpServletRequest);
-                        ResponseEntity<?> rpcResponse = (ResponseEntity<?>) rpcResult.getResult();
+                        rpcResult = processRpcRequest(deviceName, 0, 126227808, restApiTimeout, rpcRequestBody.toPrettyString(),httpServletRequest);
+                        rpcResponse = (ResponseEntity<?>) rpcResult.getResult();
 
                         if (rpcResponse.getStatusCode().is2xxSuccessful()) {
                             ResponseEntity<ObjectNode> rpcResponseEntity = (ResponseEntity<ObjectNode>) rpcResult.getResult();
@@ -748,36 +770,27 @@ public class GeoSensorXController {
                         return createResult;
                     }
                 case "stop":
-                    DeferredResult<ResponseEntity> stopResult = geoSensorXService.processStopLiveStream(jwtToken, deviceName, restApiTimeout);
-                    ResponseEntity<?> stopResponse = (ResponseEntity<?>) stopResult.getResult();
+                    rpcRequestBody = mapper.createObjectNode();
+                    rpcRequestBody.put("method", "stream-vid");
+                    rpcRequestBody.put("params", "stop");
 
-                    if (stopResponse.getStatusCode().is2xxSuccessful()) {
-                        ResponseEntity<ObjectNode> stopResponseEntity = (ResponseEntity<ObjectNode>) stopResult.getResult();
+                    rpcResult = processRpcRequest(deviceName, 0, 126227808, restApiTimeout, rpcRequestBody.toPrettyString(),httpServletRequest);
+                    rpcResponse = (ResponseEntity<?>) rpcResult.getResult();
 
-                        ObjectNode rpcRequestBody = mapper.createObjectNode();
-                        rpcRequestBody.put("method", "stream-vid");
-                        rpcRequestBody.put("params", stopResponseEntity.getBody().get("data").get("rpcId").textValue() + ",stop");
+                    if (rpcResponse.getStatusCode().is2xxSuccessful()) {
+                        ResponseEntity<ObjectNode> rpcResponseEntity = (ResponseEntity<ObjectNode>) rpcResult.getResult();
 
-                        DeferredResult<ResponseEntity> rpcResult = processRpcRequest(deviceName, 0, 126227808, restApiTimeout, rpcRequestBody.toPrettyString(),httpServletRequest);
-                        ResponseEntity<?> rpcResponse = (ResponseEntity<?>) rpcResult.getResult();
+                        ObjectNode newBody = mapper.createObjectNode();
+                        ObjectNode newData = mapper.createObjectNode();
+                        newData.put("rpcId", rpcResponseEntity.getBody().get("rpcId").textValue());
+                        newData.put("status", "SUCCESS");
+                        newBody.set("data", newData);
 
-                        if (rpcResponse.getStatusCode().is2xxSuccessful()) {
-                            ResponseEntity<ObjectNode> rpcResponseEntity = (ResponseEntity<ObjectNode>) rpcResult.getResult();
+                        result.setResult(new ResponseEntity<>(newData, HttpStatus.OK));
 
-                            ObjectNode newBody = mapper.createObjectNode();
-                            ObjectNode newData = mapper.createObjectNode();
-                            newData.put("rpcId", rpcResponseEntity.getBody().get("rpcId").textValue());
-                            newData.put("status", "SUCCESS");
-                            newBody.set("data", newData);
-
-                            result.setResult(new ResponseEntity<>(newData, HttpStatus.OK));
-
-                            return result;
-                        } else {
-                            return rpcResult;
-                        }
+                        return result;
                     } else {
-                        return stopResult;
+                        return rpcResult;
                     }
                 case "delete":
                     DeferredResult<ResponseEntity> deleteResult = geoSensorXService.processDeleteLiveStream(jwtToken, deviceName, restApiTimeout);
@@ -786,13 +799,13 @@ public class GeoSensorXController {
                     if (deleteResponse.getStatusCode() == HttpStatus.OK) {
                         ResponseEntity<ObjectNode> deleteResponseEntity = (ResponseEntity<ObjectNode>) deleteResult.getResult();
 
-                        ObjectNode rpcRequestBody = mapper.createObjectNode();
+                        rpcRequestBody = mapper.createObjectNode();
                         rpcRequestBody.put("method", "stream-vid");
                         rpcRequestBody.put("params", "stop");
 
                         try {
-                            DeferredResult<ResponseEntity> rpcResult = processRpcRequest(deviceName, 0, 126227808, restApiTimeout, rpcRequestBody.toPrettyString(),httpServletRequest);
-                            ResponseEntity<?> rpcResponse = (ResponseEntity<?>) rpcResult.getResult();
+                            rpcResult = processRpcRequest(deviceName, 0, 126227808, restApiTimeout, rpcRequestBody.toPrettyString(),httpServletRequest);
+                            rpcResponse = (ResponseEntity<?>) rpcResult.getResult();
 
                             if (!rpcResponse.getStatusCode().is2xxSuccessful()) {
                                 return rpcResult;

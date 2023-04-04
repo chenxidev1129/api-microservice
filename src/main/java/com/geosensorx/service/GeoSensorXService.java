@@ -32,8 +32,6 @@ public interface GeoSensorXService {
 
     DeferredResult<ResponseEntity> processCreateLiveStream(String jwtToken, String deviceName, JsonNode requestBody, long restApiTimeout);
 
-    DeferredResult<ResponseEntity> processStopLiveStream(String jwtToken, String deviceName, long restApiTimeout);
-
     DeferredResult<ResponseEntity> processDeleteLiveStream(String jwtToken, String deviceName, long restApiTimeout);
 
     DeferredResult<ResponseEntity> processGetLiveStreams(String jwtToken, JsonNode requestBody);
