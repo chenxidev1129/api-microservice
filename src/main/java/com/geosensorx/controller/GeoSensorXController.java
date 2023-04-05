@@ -9,6 +9,9 @@ import com.geosensorx.exception.GeoSensorXErrorCode;
 import com.geosensorx.exception.GeoSensorXErrorResponseHandler;
 import com.geosensorx.exception.GeoSensorXException;
 import com.geosensorx.service.GeoSensorXService;
+
+import lombok.extern.slf4j.Slf4j;
+
 import org.apache.coyote.Request;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
@@ -36,6 +39,7 @@ import java.time.OffsetDateTime;
 import java.time.format.DateTimeParseException;
 import java.util.Arrays;
 
+@Slf4j
 @RestController
 @RequestMapping("/api/geosensorx")
 public class GeoSensorXController {
@@ -634,11 +638,11 @@ public class GeoSensorXController {
     @RequestMapping(value = "/config/set/{deviceName}", method = RequestMethod.POST)
     @ResponseBody
     public DeferredResult<ResponseEntity> processConfigSetRequest(@PathVariable("deviceName") String deviceName,
-                                                            @RequestParam(name = "retries", required = false, defaultValue = "0") int retries,
-                                                            @RequestParam(name = "rpcExpirationTime", required = false, defaultValue = "126227808000") long rpcExpirationTime,
-                                                            @RequestParam(name = "restApiTimeout", required = false, defaultValue = "15000") long restApiTimeout,
-                                                            @RequestBody String request,
-                                                            HttpServletRequest httpServletRequest) throws GeoSensorXException {
+                                                                  @RequestParam(name = "retries", required = false, defaultValue = "0") int retries,
+                                                                  @RequestParam(name = "rpcExpirationTime", required = false, defaultValue = "126227808000") long rpcExpirationTime,
+                                                                  @RequestParam(name = "restApiTimeout", required = false, defaultValue = "15000") long restApiTimeout,
+                                                                  @RequestBody String request,
+                                                                  HttpServletRequest httpServletRequest) throws GeoSensorXException {
         String jwtToken = getJwtTokenFromRequest(httpServletRequest);
         ObjectNode params;
         try {
@@ -684,8 +688,22 @@ public class GeoSensorXController {
         String jwtToken = getJwtTokenFromRequest(httpServletRequest);
         ObjectNode params = mapper.createObjectNode();
 
-        return null;
+        ObjectNode configGetRequest = mapper.createObjectNode();
+        configGetRequest.put("method", CONFIG_GET);
+        params.put("retries", retries);
+        if (rpcExpirationTime > 0) {
+            params.put("expirationTime", System.currentTimeMillis() + rpcExpirationTime);
+        }
+        params.put("request", "\"\"");
+        configGetRequest.set("params", params);
+        try {
+            return geoSensorXService.processDeviceRestApiRequestToRuleEngine(jwtToken, deviceName, configGetRequest, restApiTimeout);
+        } catch (Exception e) {
+            throw new GeoSensorXException("Failed to process request due to: " + e + "!", GeoSensorXErrorCode.GENERAL);
+        }
     }
+
+
 
     @RequestMapping(value = "/livestream/{deviceName}", method = RequestMethod.POST)
     @ResponseBody
@@ -745,7 +763,16 @@ public class GeoSensorXController {
 
                         rpcRequestBody = mapper.createObjectNode();
                         rpcRequestBody.put("method", "stream-vid");
-                        rpcRequestBody.put("params", "start," + (payload.has("channel") ? payload.get("channel").intValue() : "") + "," + (payload.has("interval") ? payload.get("interval").intValue() : "") + ",rtmp://global-live.mux.com:5222/app/" + createResponseEntity.getBody().get("data").get("streamKey").textValue() + "," + (payload.has("duration") ? payload.get("duration").intValue() : ""));
+                        String paramValues = "start,"
+                                + (payload.has("channel") ? payload.get("channel").intValue() : "") + ","
+                                + (payload.has("camera audio") ? (payload.get("camera audio").booleanValue()?1:0) : "") + ","
+                                + (payload.has("resolution") ? payload.get("resolution").intValue() : "") + ","
+                                + (payload.has("frame rate") ? payload.get("frame rate").intValue() : "") + ","
+                                + "512000" + ","
+                                + "rtmp://global-live.mux.com:5222/app/" + createResponseEntity.getBody().get("data").get("streamKey").textValue() + ","
+                                + (payload.has("duration") ? payload.get("duration").intValue() : "" );
+                        log.info(paramValues);
+                        rpcRequestBody.put("params", paramValues);
 
                         rpcResult = processRpcRequest(deviceName, 0, 126227808, restApiTimeout, rpcRequestBody.toPrettyString(),httpServletRequest);
                         rpcResponse = (ResponseEntity<?>) rpcResult.getResult();
@@ -817,7 +844,7 @@ public class GeoSensorXController {
                         ObjectNode newBody = mapper.createObjectNode();
                         ObjectNode newData = mapper.createObjectNode();
                         newData.put("rpcId", deleteResponseEntity.getBody().get("data").get("rpcId").textValue());
-                        newData.put("status", "SUCCESS");
+                        newData.put("status", deleteResponseEntity.getBody().get("data").get("status").textValue());
                         newBody.set("data", newData);
 
                         result.setResult(new ResponseEntity<>(newData, HttpStatus.OK));

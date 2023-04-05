@@ -354,7 +354,6 @@ public class DefaultGeoSensorXService implements GeoSensorXService {
                             .findFirst();
                     if (deviceOptional.isPresent()) {
                         result.setResult(new ResponseEntity(deviceOptional.get(), HttpStatus.OK));
-                        return result;
                     } else {
                         result.setErrorResult(deviceNotFoundResponseEntity(deviceName));
                     }
@@ -558,7 +557,6 @@ public class DefaultGeoSensorXService implements GeoSensorXService {
                 ResponseEntity<?> deviceResponse = (ResponseEntity<?>) deferredResult.getResult();
                 if (deviceResponse.getStatusCode().is2xxSuccessful()) {
                     DeferredResult<ResponseEntity> result = new DeferredResult<>();
-
                     ResponseEntity<Device> deviceResponseEntity = (ResponseEntity<Device>) deviceResponse;
                     if (deviceResponseEntity.getBody() != null) {
                         Device device = deviceResponseEntity.getBody();
@@ -606,7 +604,7 @@ public class DefaultGeoSensorXService implements GeoSensorXService {
                                 newAssetSettings.putPOJO("playback_policy", playbackPolicy);
                                 liveSteamRequest.set("new_asset_settings", newAssetSettings);
                                 HttpEntity<JsonNode> httpEntity = new HttpEntity<>(liveSteamRequest, headers);
-                                log.debug("Try to process create a live stream request: {}, requestTime: {}", endPointURL, System.currentTimeMillis());
+                                log.info("Try to process create a live stream request: {}, requestTime: {}", endPointURL, System.currentTimeMillis());
                                 ListenableFuture<ResponseEntity<MuxInfoData<LiveStream>>> liveStreamFuture = muxhttpClient.exchange(
                                         endPointURL, HttpMethod.POST, httpEntity, new ParameterizedTypeReference<>() {
                                         });
@@ -618,6 +616,8 @@ public class DefaultGeoSensorXService implements GeoSensorXService {
                                     LiveStream liveStreamInfo = data.getBody().getData();
 
                                     ObjectNode attributesRequestBody = mapper.createObjectNode();
+                                    log.info("Mux stream key: " + liveStreamInfo.stream_key);
+                                    log.info("Live stream playback id: " + liveStreamInfo.playback_ids.get(0).id);
                                     attributesRequestBody.put("stream_key", liveStreamInfo.stream_key);
                                     attributesRequestBody.put("playback_id", liveStreamInfo.playback_ids.get(0).id);
                                     attributesRequestBody.put("created_at", liveStreamInfo.created_at);
